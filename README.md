@@ -40,12 +40,12 @@ Terminal 1:
 
 Terminal 2:
 ```bash
-./build/skufy_client/skufy_client --config skufy_client/config.json 127.0.0.1 8000 1
+./build/skufy_client/skufy_client --config skufy_client/config.json --user-id 1 127.0.0.1 8000
 ```
 
 Terminal 3:
 ```bash
-./build/skufy_client/skufy_client --config skufy_client/config.json 127.0.0.1 8000 2
+./build/skufy_client/skufy_client --config skufy_client/config.json --user-id 2 127.0.0.1 8000
 ```
 
 More clients can be started with unique user IDs.
@@ -80,8 +80,12 @@ docker compose down
 ```
 
 For custom signaling port, edit `docker-compose.yml`:
-- change `ports` mapping (`50000:50000`)
-- change `command` to `["50000"]`
+- change `skufy_server/config.json` (`signaling_port`)
+
+The compose file uses `network_mode: host` on Linux so WebRTC ICE sees the host
+network interfaces directly. With host networking, Docker `ports` mappings are
+not used; open `signaling_port`/TCP and the configured ICE UDP port range on the
+host firewall instead.
 
 ## config.json (remote host setup)
 
@@ -106,22 +110,22 @@ CLI args still override config values.
 
 Run a listener-only client (no microphone transmit):
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 3 --mic-off
+./build/skufy_client/skufy_client 127.0.0.1 8000 --user-id 3 --mic-off
 ```
 
 Run without speaker playback:
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 4 --no-speaker
+./build/skufy_client/skufy_client 127.0.0.1 8000 --user-id 4 --no-speaker
 ```
 
 List audio devices:
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 1 --list-audio-devices
+./build/skufy_client/skufy_client 127.0.0.1 8000 --user-id 1 --list-audio-devices
 ```
 
 Pick explicit mic/speaker by device id:
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 1 --mic-device 2 --speaker-device 4
+./build/skufy_client/skufy_client 127.0.0.1 8000 --user-id 1 --mic-device 2 --speaker-device 4
 ```
 
 Each client prints local mixed-audio metrics:

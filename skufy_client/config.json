@@ -7,6 +7,8 @@
   "ice_port_range_begin": 40000,
   "ice_port_range_end": 40100,
   "ice_servers": [
-    "stun:stun.l.google.com:19302"
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+    "stun:stun.cloudflare.com:3478"
   ]
 }

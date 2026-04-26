@@ -645,6 +645,14 @@ CliOptions load_client_config(const std::string& path) {
     return options;
 }
 
+std::uint32_t parse_user_id(const std::string& value) {
+    const auto id = std::stoul(value);
+    if (id == 0 || id > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("user_id must be in [1, 2^32-1]");
+    }
+    return static_cast<std::uint32_t>(id);
+}
+
 rtc::Configuration build_peer_config(const CliOptions& options) {
     rtc::Configuration config;
     if (options.ice_bind_address) {
@@ -733,6 +741,11 @@ CliOptions parse_args(int argc, char** argv) {
             options.speaker_enabled = false;
         } else if (arg == "--list-audio-devices") {
             options.list_audio_devices = true;
+        } else if (arg == "--user-id") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--user-id requires integer id");
+            }
+            options.user_id = parse_user_id(argv[++i]);
         } else if (arg == "--mic-device") {
             if (i + 1 >= argc) {
                 throw std::runtime_error("--mic-device requires integer id");
@@ -746,7 +759,7 @@ CliOptions parse_args(int argc, char** argv) {
         } else {
             if (starts_with(arg, "--")) {
                 throw std::runtime_error("unknown flag: " + arg +
-                                         " (supported: --config PATH --mic-off --no-speaker --list-audio-devices --mic-device N --speaker-device N)");
+                                         " (supported: --config PATH --user-id N --mic-off --no-speaker --list-audio-devices --mic-device N --speaker-device N)");
             }
             positional.push_back(arg);
         }
@@ -762,11 +775,7 @@ CliOptions parse_args(int argc, char** argv) {
         options.signaling_port = static_cast<std::uint16_t>(port);
     }
     if (positional.size() >= 3) {
-        const auto id = std::stoul(positional[2]);
-        if (id == 0 || id > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("user_id must be in [1, 2^32-1]");
-        }
-        options.user_id = static_cast<std::uint32_t>(id);
+        options.user_id = parse_user_id(positional[2]);
     }
     return options;
 }
