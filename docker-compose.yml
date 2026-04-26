@@ -1,0 +1,10 @@
+services:
+  skufy_server:
+    build:
+      context: .
+      dockerfile: skufy_server/Dockerfile
+    image: skufy-server:local
+    container_name: skufy_server
+    ports:
+      - "8000:8000"
+    command: ["8000"]

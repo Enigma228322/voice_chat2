@@ -1,0 +1,10 @@
+{
+  "signaling_port": 8000,
+  "bind_address": "10.129.0.26",
+  "ice_bind_address": "0.0.0.0",
+  "ice_port_range_begin": 40000,
+  "ice_port_range_end": 40100,
+  "ice_servers": [
+    "stun:stun.l.google.com:19302"
+  ]
+}

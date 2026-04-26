@@ -1,11 +1,15 @@
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -79,16 +83,106 @@ bool starts_with(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
 }
 
+std::string read_file_or_empty(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return {};
+    }
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+std::optional<std::string> json_string(const std::string& json, const std::string& key) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::smatch m;
+    if (!std::regex_search(json, m, re)) {
+        return std::nullopt;
+    }
+    return m[1].str();
+}
+
+std::optional<int> json_int(const std::string& json, const std::string& key) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+    std::smatch m;
+    if (!std::regex_search(json, m, re)) {
+        return std::nullopt;
+    }
+    return std::stoi(m[1].str());
+}
+
+std::vector<std::string> json_string_array(const std::string& json, const std::string& key) {
+    const std::regex array_re("\"" + key + "\"\\s*:\\s*\\[([\\s\\S]*?)\\]");
+    std::smatch m;
+    if (!std::regex_search(json, m, array_re)) {
+        return {};
+    }
+    const std::string content = m[1].str();
+    const std::regex item_re("\"([^\"]*)\"");
+    std::vector<std::string> values;
+    for (auto it = std::sregex_iterator(content.begin(), content.end(), item_re);
+         it != std::sregex_iterator();
+         ++it) {
+        values.push_back((*it)[1].str());
+    }
+    return values;
+}
+
+struct ServerOptions {
+    std::uint16_t signaling_port = 8000;
+    std::optional<std::string> bind_address;
+    rtc::Configuration peer_config {};
+};
+
+ServerOptions load_server_options_from_file(const std::string& config_path) {
+    ServerOptions options;
+    const std::string json = read_file_or_empty(config_path);
+    if (json.empty()) {
+        return options;
+    }
+
+    if (const auto port = json_int(json, "signaling_port")) {
+        if (*port < 1 || *port > 65535) {
+            throw std::runtime_error("config signaling_port must be in [1, 65535]");
+        }
+        options.signaling_port = static_cast<std::uint16_t>(*port);
+    }
+    if (const auto bind = json_string(json, "bind_address")) {
+        options.bind_address = *bind;
+    }
+    if (const auto ice_bind = json_string(json, "ice_bind_address")) {
+        options.peer_config.bindAddress = *ice_bind;
+    } else if (options.bind_address) {
+        options.peer_config.bindAddress = *options.bind_address;
+    }
+    if (const auto begin = json_int(json, "ice_port_range_begin")) {
+        options.peer_config.portRangeBegin = static_cast<std::uint16_t>(*begin);
+    }
+    if (const auto end = json_int(json, "ice_port_range_end")) {
+        options.peer_config.portRangeEnd = static_cast<std::uint16_t>(*end);
+    }
+    if (options.peer_config.portRangeBegin > options.peer_config.portRangeEnd) {
+        throw std::runtime_error("config ice_port_range_begin must be <= ice_port_range_end");
+    }
+    for (const auto& url : json_string_array(json, "ice_servers")) {
+        options.peer_config.iceServers.emplace_back(url);
+    }
+    return options;
+}
+
 class WebRtcSfuServer {
 public:
-    explicit WebRtcSfuServer(std::uint16_t signaling_port)
-        : signaling_port_(signaling_port) {}
+    explicit WebRtcSfuServer(ServerOptions options)
+        : signaling_port_(options.signaling_port),
+          bind_address_(std::move(options.bind_address)),
+          peer_config_(std::move(options.peer_config)) {}
 
     void run() {
         rtc::InitLogger(rtc::LogLevel::Info);
 
         rtc::WebSocketServer::Configuration config;
         config.port = signaling_port_;
+        if (bind_address_) {
+            config.bindAddress = *bind_address_;
+        }
         websocket_server_ = std::make_unique<rtc::WebSocketServer>(config);
         websocket_server_->onClient([this](std::shared_ptr<rtc::WebSocket> ws) { on_client(std::move(ws)); });
 
@@ -96,6 +190,7 @@ public:
 
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            log_traffic_once();
         }
     }
 
@@ -154,7 +249,7 @@ private:
         Session session;
         session.user_id = user_id;
         session.ws = ws;
-        session.pc = std::make_shared<rtc::PeerConnection>(rtc::Configuration{});
+        session.pc = std::make_shared<rtc::PeerConnection>(peer_config_);
         session.pc->onLocalDescription([this, user_id](rtc::Description description) {
             send_offer(user_id, description);
         });
@@ -236,6 +331,8 @@ private:
         if (frame.size() != kFrameBytes) {
             return;
         }
+        rx_frames_.fetch_add(1, std::memory_order_relaxed);
+        rx_bytes_.fetch_add(static_cast<std::uint64_t>(frame.size()), std::memory_order_relaxed);
 
         rtc::binary packet(4 + frame.size());
         packet[0] = static_cast<std::byte>(source_user_id & 0xFFu);
@@ -256,7 +353,27 @@ private:
         }
         for (const auto& dc : recipients) {
             dc->send(packet);
+            tx_frames_.fetch_add(1, std::memory_order_relaxed);
+            tx_bytes_.fetch_add(static_cast<std::uint64_t>(packet.size()), std::memory_order_relaxed);
         }
+    }
+
+    void log_traffic_once() {
+        const auto rx_frames = rx_frames_.exchange(0, std::memory_order_relaxed);
+        const auto tx_frames = tx_frames_.exchange(0, std::memory_order_relaxed);
+        const auto rx_bytes = rx_bytes_.exchange(0, std::memory_order_relaxed);
+        const auto tx_bytes = tx_bytes_.exchange(0, std::memory_order_relaxed);
+        total_rx_frames_.fetch_add(rx_frames, std::memory_order_relaxed);
+        total_tx_frames_.fetch_add(tx_frames, std::memory_order_relaxed);
+        total_rx_bytes_.fetch_add(rx_bytes, std::memory_order_relaxed);
+        total_tx_bytes_.fetch_add(tx_bytes, std::memory_order_relaxed);
+        std::cout << "[server] traffic rx_frames/s=" << rx_frames
+                  << " rx_bytes/s=" << rx_bytes
+                  << " tx_frames/s=" << tx_frames
+                  << " tx_bytes/s=" << tx_bytes
+                  << " total_rx_bytes=" << total_rx_bytes_.load(std::memory_order_relaxed)
+                  << " total_tx_bytes=" << total_tx_bytes_.load(std::memory_order_relaxed)
+                  << "\n";
     }
 
     void on_disconnect(rtc::WebSocket* ws_ptr) {
@@ -275,28 +392,54 @@ private:
 
 private:
     std::uint16_t signaling_port_ = 8000;
+    std::optional<std::string> bind_address_;
+    rtc::Configuration peer_config_ {};
     std::unique_ptr<rtc::WebSocketServer> websocket_server_;
     std::mutex mutex_;
     std::unordered_map<std::uint32_t, Session> sessions_;
     std::unordered_map<rtc::WebSocket*, std::uint32_t> ws_to_user_;
     std::unordered_map<rtc::WebSocket*, std::shared_ptr<rtc::WebSocket>> pending_ws_;
+    std::atomic<std::uint64_t> rx_frames_ {0};
+    std::atomic<std::uint64_t> tx_frames_ {0};
+    std::atomic<std::uint64_t> rx_bytes_ {0};
+    std::atomic<std::uint64_t> tx_bytes_ {0};
+    std::atomic<std::uint64_t> total_rx_frames_ {0};
+    std::atomic<std::uint64_t> total_tx_frames_ {0};
+    std::atomic<std::uint64_t> total_rx_bytes_ {0};
+    std::atomic<std::uint64_t> total_tx_bytes_ {0};
 };
 
-std::uint16_t parse_port(int argc, char** argv) {
-    if (argc < 2) {
-        return 8000;
+ServerOptions parse_server_options(int argc, char** argv) {
+    std::string config_path = "config.json";
+    std::optional<std::uint16_t> port_override;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--config requires a file path");
+            }
+            config_path = argv[++i];
+            continue;
+        }
+        const int value = std::stoi(arg);
+        if (value < 1 || value > 65535) {
+            throw std::runtime_error("port must be in [1, 65535]");
+        }
+        port_override = static_cast<std::uint16_t>(value);
     }
-    const int value = std::stoi(argv[1]);
-    if (value < 1 || value > 65535) {
-        throw std::runtime_error("port must be in [1, 65535]");
+
+    auto options = load_server_options_from_file(config_path);
+    if (port_override) {
+        options.signaling_port = *port_override;
     }
-    return static_cast<std::uint16_t>(value);
+    return options;
 }
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
-        WebRtcSfuServer server(parse_port(argc, argv));
+        WebRtcSfuServer server(parse_server_options(argc, argv));
         server.run();
     } catch (const std::exception& ex) {
         std::cerr << "[server] fatal error: " << ex.what() << "\n";

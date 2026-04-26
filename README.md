@@ -35,20 +35,74 @@ cmake --build build -j
 
 Terminal 1:
 ```bash
-./build/skufy_server/skufy_server 8000
+./build/skufy_server/skufy_server --config skufy_server/config.json
 ```
 
 Terminal 2:
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 1
+./build/skufy_client/skufy_client --config skufy_client/config.json 127.0.0.1 8000 1
 ```
 
 Terminal 3:
 ```bash
-./build/skufy_client/skufy_client 127.0.0.1 8000 2
+./build/skufy_client/skufy_client --config skufy_client/config.json 127.0.0.1 8000 2
 ```
 
 More clients can be started with unique user IDs.
+
+## Run server in Docker
+
+Build image:
+```bash
+docker build -f skufy_server/Dockerfile -t skufy-server:local .
+```
+
+Run container:
+```bash
+docker run --rm -p 8000:8000 skufy-server:local
+```
+
+Run container with custom signaling port:
+```bash
+docker run --rm -p 50000:50000 skufy-server:local 50000
+```
+
+## Run server with Docker Compose
+
+Start:
+```bash
+docker compose up --build --force-recreate
+```
+
+Stop:
+```bash
+docker compose down
+```
+
+For custom signaling port, edit `docker-compose.yml`:
+- change `ports` mapping (`50000:50000`)
+- change `command` to `["50000"]`
+
+## config.json (remote host setup)
+
+Server reads `--config skufy_server/config.json`:
+- `signaling_port`
+- `bind_address`
+- `ice_bind_address`
+- `ice_port_range_begin` / `ice_port_range_end`
+- `ice_servers` (STUN/TURN URLs)
+
+Client reads `--config skufy_client/config.json`:
+- `host`
+- `signaling_port`
+- `user_id`
+- `mic_enabled` / `speaker_enabled`
+- `mic_device` / `speaker_device` (optional)
+- `ice_bind_address`
+- `ice_port_range_begin` / `ice_port_range_end`
+- `ice_servers` (STUN/TURN URLs)
+
+CLI args still override config values.
 
 Run a listener-only client (no microphone transmit):
 ```bash

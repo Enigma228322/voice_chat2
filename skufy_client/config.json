@@ -1,0 +1,12 @@
+{
+  "host": "89.169.179.135",
+  "signaling_port": 8000,
+  "user_id": 1,
+  "mic_enabled": true,
+  "speaker_enabled": true,
+  "ice_port_range_begin": 40000,
+  "ice_port_range_end": 40100,
+  "ice_servers": [
+    "stun:stun.l.google.com:19302"
+  ]
+}

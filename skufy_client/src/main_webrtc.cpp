@@ -6,11 +6,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -86,6 +89,58 @@ bool starts_with(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
 }
 
+std::string read_file_or_empty(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return {};
+    }
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+std::optional<std::string> json_string(const std::string& json, const std::string& key) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    std::smatch m;
+    if (!std::regex_search(json, m, re)) {
+        return std::nullopt;
+    }
+    return m[1].str();
+}
+
+std::optional<int> json_int(const std::string& json, const std::string& key) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+    std::smatch m;
+    if (!std::regex_search(json, m, re)) {
+        return std::nullopt;
+    }
+    return std::stoi(m[1].str());
+}
+
+std::optional<bool> json_bool(const std::string& json, const std::string& key) {
+    const std::regex re("\"" + key + "\"\\s*:\\s*(true|false)");
+    std::smatch m;
+    if (!std::regex_search(json, m, re)) {
+        return std::nullopt;
+    }
+    return m[1].str() == "true";
+}
+
+std::vector<std::string> json_string_array(const std::string& json, const std::string& key) {
+    const std::regex array_re("\"" + key + "\"\\s*:\\s*\\[([\\s\\S]*?)\\]");
+    std::smatch m;
+    if (!std::regex_search(json, m, array_re)) {
+        return {};
+    }
+    const std::string content = m[1].str();
+    const std::regex item_re("\"([^\"]*)\"");
+    std::vector<std::string> values;
+    for (auto it = std::sregex_iterator(content.begin(), content.end(), item_re);
+         it != std::sregex_iterator();
+         ++it) {
+        values.push_back((*it)[1].str());
+    }
+    return values;
+}
+
 class VoiceClient {
 public:
     VoiceClient(std::string host,
@@ -94,14 +149,16 @@ public:
                 bool mic_enabled,
                 bool speaker_enabled,
                 std::optional<int> mic_device,
-                std::optional<int> speaker_device)
+                std::optional<int> speaker_device,
+                rtc::Configuration peer_config)
         : host_(std::move(host)),
           signaling_port_(signaling_port),
           user_id_(user_id),
           mic_enabled_(mic_enabled),
           speaker_enabled_(speaker_enabled),
           mic_device_(mic_device),
-          speaker_device_(speaker_device) {}
+          speaker_device_(speaker_device),
+          peer_config_(std::move(peer_config)) {}
 
     ~VoiceClient() {
         shutdown();
@@ -245,7 +302,7 @@ private:
     }
 
     void setup_peer_connection() {
-        peer_connection_ = std::make_shared<rtc::PeerConnection>(rtc::Configuration{});
+        peer_connection_ = std::make_shared<rtc::PeerConnection>(peer_config_);
         peer_connection_->onLocalDescription([this](rtc::Description description) {
             if (description.typeString() == "answer") {
                 send_signaling("ANSWER " + base64_encode(std::string(description)));
@@ -324,6 +381,8 @@ private:
         if (packet.size() != 4 + kFrameBytes) {
             return;
         }
+        rx_net_frames_.fetch_add(1, std::memory_order_relaxed);
+        rx_net_bytes_.fetch_add(static_cast<std::uint64_t>(packet.size()), std::memory_order_relaxed);
         const auto b0 = static_cast<std::uint32_t>(std::to_integer<unsigned char>(packet[0]));
         const auto b1 = static_cast<std::uint32_t>(std::to_integer<unsigned char>(packet[1]));
         const auto b2 = static_cast<std::uint32_t>(std::to_integer<unsigned char>(packet[2]));
@@ -361,6 +420,8 @@ private:
                 rtc::binary payload(kFrameBytes);
                 std::memcpy(payload.data(), frame.data(), kFrameBytes);
                 dc->send(payload);
+                tx_net_frames_.fetch_add(1, std::memory_order_relaxed);
+                tx_net_bytes_.fetch_add(static_cast<std::uint64_t>(payload.size()), std::memory_order_relaxed);
             }
             std::this_thread::sleep_until(next_tick);
             next_tick += interval;
@@ -431,8 +492,20 @@ private:
         using namespace std::chrono;
         while (running_.load()) {
             std::this_thread::sleep_for(seconds(1));
+            const auto tx_frames = tx_net_frames_.exchange(0, std::memory_order_relaxed);
+            const auto rx_frames = rx_net_frames_.exchange(0, std::memory_order_relaxed);
+            const auto tx_bytes = tx_net_bytes_.exchange(0, std::memory_order_relaxed);
+            const auto rx_bytes = rx_net_bytes_.exchange(0, std::memory_order_relaxed);
+            total_tx_net_bytes_.fetch_add(tx_bytes, std::memory_order_relaxed);
+            total_rx_net_bytes_.fetch_add(rx_bytes, std::memory_order_relaxed);
             std::cout << "[client " << user_id_
                       << "] rx frames/s=" << rx_frames_.exchange(0)
+                      << " net_tx_frames/s=" << tx_frames
+                      << " net_rx_frames/s=" << rx_frames
+                      << " net_tx_bytes/s=" << tx_bytes
+                      << " net_rx_bytes/s=" << rx_bytes
+                      << " total_net_tx_bytes=" << total_tx_net_bytes_.load(std::memory_order_relaxed)
+                      << " total_net_rx_bytes=" << total_rx_net_bytes_.load(std::memory_order_relaxed)
                       << " mixed_tracks=" << active_tracks_.load()
                       << " mic_callbacks/s=" << captured_seq_.exchange(0)
                       << " rms=" << static_cast<int>(rx_rms_.load()) << "\n";
@@ -473,6 +546,7 @@ private:
     bool speaker_enabled_ = true;
     std::optional<int> mic_device_;
     std::optional<int> speaker_device_;
+    rtc::Configuration peer_config_ {};
 
     std::atomic<bool> running_ {false};
     std::thread sender_thread_;
@@ -488,6 +562,12 @@ private:
     std::atomic<double> rx_rms_ {0.0};
     std::atomic<std::uint64_t> rx_frames_ {0};
     std::atomic<std::uint32_t> active_tracks_ {0};
+    std::atomic<std::uint64_t> tx_net_frames_ {0};
+    std::atomic<std::uint64_t> rx_net_frames_ {0};
+    std::atomic<std::uint64_t> tx_net_bytes_ {0};
+    std::atomic<std::uint64_t> rx_net_bytes_ {0};
+    std::atomic<std::uint64_t> total_tx_net_bytes_ {0};
+    std::atomic<std::uint64_t> total_rx_net_bytes_ {0};
 
     std::mutex remote_tracks_mutex_;
     std::unordered_map<std::uint32_t, RemoteTrack> remote_tracks_;
@@ -508,9 +588,82 @@ struct CliOptions {
     bool mic_enabled = true;
     bool speaker_enabled = true;
     bool list_audio_devices = false;
+    std::string config_path = "config.json";
     std::optional<int> mic_device;
     std::optional<int> speaker_device;
+    std::optional<std::string> ice_bind_address;
+    std::optional<std::uint16_t> ice_port_range_begin;
+    std::optional<std::uint16_t> ice_port_range_end;
+    std::vector<std::string> ice_servers;
 };
+
+CliOptions load_client_config(const std::string& path) {
+    CliOptions options;
+    options.config_path = path;
+
+    const std::string json = read_file_or_empty(path);
+    if (json.empty()) {
+        return options;
+    }
+    if (const auto host = json_string(json, "host")) {
+        options.host = *host;
+    }
+    if (const auto port = json_int(json, "signaling_port")) {
+        if (*port < 1 || *port > 65535) {
+            throw std::runtime_error("config signaling_port must be in [1, 65535]");
+        }
+        options.signaling_port = static_cast<std::uint16_t>(*port);
+    }
+    if (const auto id = json_int(json, "user_id")) {
+        if (*id < 1) {
+            throw std::runtime_error("config user_id must be >= 1");
+        }
+        options.user_id = static_cast<std::uint32_t>(*id);
+    }
+    if (const auto v = json_bool(json, "mic_enabled")) {
+        options.mic_enabled = *v;
+    }
+    if (const auto v = json_bool(json, "speaker_enabled")) {
+        options.speaker_enabled = *v;
+    }
+    if (const auto v = json_int(json, "mic_device")) {
+        options.mic_device = *v;
+    }
+    if (const auto v = json_int(json, "speaker_device")) {
+        options.speaker_device = *v;
+    }
+    if (const auto v = json_string(json, "ice_bind_address")) {
+        options.ice_bind_address = *v;
+    }
+    if (const auto v = json_int(json, "ice_port_range_begin")) {
+        options.ice_port_range_begin = static_cast<std::uint16_t>(*v);
+    }
+    if (const auto v = json_int(json, "ice_port_range_end")) {
+        options.ice_port_range_end = static_cast<std::uint16_t>(*v);
+    }
+    options.ice_servers = json_string_array(json, "ice_servers");
+    return options;
+}
+
+rtc::Configuration build_peer_config(const CliOptions& options) {
+    rtc::Configuration config;
+    if (options.ice_bind_address) {
+        config.bindAddress = *options.ice_bind_address;
+    }
+    if (options.ice_port_range_begin) {
+        config.portRangeBegin = *options.ice_port_range_begin;
+    }
+    if (options.ice_port_range_end) {
+        config.portRangeEnd = *options.ice_port_range_end;
+    }
+    if (config.portRangeBegin > config.portRangeEnd) {
+        throw std::runtime_error("ice_port_range_begin must be <= ice_port_range_end");
+    }
+    for (const auto& server : options.ice_servers) {
+        config.iceServers.emplace_back(server);
+    }
+    return config;
+}
 
 void list_audio_devices() {
     const PaError init_err = Pa_Initialize();
@@ -557,27 +710,24 @@ void list_audio_devices() {
 }
 
 CliOptions parse_args(int argc, char** argv) {
-    CliOptions options;
-    if (argc >= 2) {
-        options.host = argv[1];
-    }
-    if (argc >= 3) {
-        const int port = std::stoi(argv[2]);
-        if (port < 1 || port > 65535) {
-            throw std::runtime_error("signaling_port must be in [1, 65535]");
-        }
-        options.signaling_port = static_cast<std::uint16_t>(port);
-    }
-    if (argc >= 4) {
-        const auto id = std::stoul(argv[3]);
-        if (id == 0 || id > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("user_id must be in [1, 2^32-1]");
-        }
-        options.user_id = static_cast<std::uint32_t>(id);
-    }
-    for (int i = 4; i < argc; ++i) {
+    std::string config_path = "config.json";
+    for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--mic-off") {
+        if (arg == "--config") {
+            if (i + 1 >= argc) {
+                throw std::runtime_error("--config requires a file path");
+            }
+            config_path = argv[++i];
+        }
+    }
+    CliOptions options = load_client_config(config_path);
+
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--config") {
+            ++i;
+        } else if (arg == "--mic-off") {
             options.mic_enabled = false;
         } else if (arg == "--no-speaker") {
             options.speaker_enabled = false;
@@ -594,9 +744,29 @@ CliOptions parse_args(int argc, char** argv) {
             }
             options.speaker_device = std::stoi(argv[++i]);
         } else {
-            throw std::runtime_error("unknown flag: " + arg +
-                                     " (supported: --mic-off --no-speaker --list-audio-devices --mic-device N --speaker-device N)");
+            if (starts_with(arg, "--")) {
+                throw std::runtime_error("unknown flag: " + arg +
+                                         " (supported: --config PATH --mic-off --no-speaker --list-audio-devices --mic-device N --speaker-device N)");
+            }
+            positional.push_back(arg);
         }
+    }
+    if (!positional.empty()) {
+        options.host = positional[0];
+    }
+    if (positional.size() >= 2) {
+        const int port = std::stoi(positional[1]);
+        if (port < 1 || port > 65535) {
+            throw std::runtime_error("signaling_port must be in [1, 65535]");
+        }
+        options.signaling_port = static_cast<std::uint16_t>(port);
+    }
+    if (positional.size() >= 3) {
+        const auto id = std::stoul(positional[2]);
+        if (id == 0 || id > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("user_id must be in [1, 2^32-1]");
+        }
+        options.user_id = static_cast<std::uint32_t>(id);
     }
     return options;
 }
@@ -615,7 +785,8 @@ int main(int argc, char** argv) {
                            options.mic_enabled,
                            options.speaker_enabled,
                            options.mic_device,
-                           options.speaker_device);
+                           options.speaker_device,
+                           build_peer_config(options));
         client.run();
     } catch (const std::exception& ex) {
         std::cerr << "[client] fatal error: " << ex.what() << "\n";

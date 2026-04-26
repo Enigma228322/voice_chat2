@@ -19,6 +19,8 @@ if(APPLE)
 endif()
 
 option(SKUFY_USE_BUNDLED_LIBDATACHANNEL "Build libdatachannel from lib/libdatachannel" ON)
+option(SKUFY_BUILD_SERVER "Build skufy_server target" ON)
+option(SKUFY_BUILD_CLIENT "Build skufy_client target" ON)
 
 if(SKUFY_USE_BUNDLED_LIBDATACHANNEL AND EXISTS "${CMAKE_SOURCE_DIR}/lib/libdatachannel/CMakeLists.txt")
     # Keep bundled dependency minimal and fast for local prototype builds.
@@ -31,5 +33,10 @@ else()
     find_package(LibDataChannel REQUIRED CONFIG)
 endif()
 
-add_subdirectory(skufy_server)
-add_subdirectory(skufy_client)
+if(SKUFY_BUILD_SERVER)
+    add_subdirectory(skufy_server)
+endif()
+
+if(SKUFY_BUILD_CLIENT)
+    add_subdirectory(skufy_client)
+endif()
