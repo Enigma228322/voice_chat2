@@ -6,4 +6,10 @@ services:
     image: skufy-server:local
     container_name: skufy_server
     network_mode: host
-    command: ["--config", "skufy_server/config.json"]
+    environment:
+      SKUFY_SIGNALING_PORT: "${SKUFY_SIGNALING_PORT:-8000}"
+      SKUFY_BIND_ADDRESS: "${SKUFY_BIND_ADDRESS:-}"
+      SKUFY_ICE_BIND_ADDRESS: "${SKUFY_ICE_BIND_ADDRESS:-}"
+      SKUFY_ICE_PORT_RANGE_BEGIN: "${SKUFY_ICE_PORT_RANGE_BEGIN:-40000}"
+      SKUFY_ICE_PORT_RANGE_END: "${SKUFY_ICE_PORT_RANGE_END:-40100}"
+      SKUFY_ICE_SERVERS: "${SKUFY_ICE_SERVERS:-stun:stun.l.google.com:19302}"

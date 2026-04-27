@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -126,11 +127,75 @@ std::vector<std::string> json_string_array(const std::string& json, const std::s
     return values;
 }
 
+std::optional<std::string> env_string(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return std::nullopt;
+    }
+    return std::string(value);
+}
+
+std::uint16_t parse_port_value(const std::string& name, const std::string& value) {
+    std::size_t parsed = 0;
+    const unsigned long port = std::stoul(value, &parsed);
+    if (parsed != value.size() || port < 1 || port > 65535) {
+        throw std::runtime_error(name + " must be in [1, 65535]");
+    }
+    return static_cast<std::uint16_t>(port);
+}
+
+std::vector<std::string> split_csv(const std::string& value) {
+    std::vector<std::string> items;
+    std::size_t begin = 0;
+    while (begin <= value.size()) {
+        const auto end = value.find(',', begin);
+        const auto item = value.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        if (!item.empty()) {
+            items.push_back(item);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return items;
+}
+
 struct ServerOptions {
     std::uint16_t signaling_port = 8000;
     std::optional<std::string> bind_address;
     rtc::Configuration peer_config {};
 };
+
+ServerOptions load_server_options_from_env() {
+    ServerOptions options;
+    if (const auto port = env_string("SKUFY_SIGNALING_PORT")) {
+        options.signaling_port = parse_port_value("SKUFY_SIGNALING_PORT", *port);
+    }
+    if (const auto bind = env_string("SKUFY_BIND_ADDRESS")) {
+        options.bind_address = *bind;
+    }
+    if (const auto ice_bind = env_string("SKUFY_ICE_BIND_ADDRESS")) {
+        options.peer_config.bindAddress = *ice_bind;
+    } else if (options.bind_address) {
+        options.peer_config.bindAddress = *options.bind_address;
+    }
+    if (const auto begin = env_string("SKUFY_ICE_PORT_RANGE_BEGIN")) {
+        options.peer_config.portRangeBegin = parse_port_value("SKUFY_ICE_PORT_RANGE_BEGIN", *begin);
+    }
+    if (const auto end = env_string("SKUFY_ICE_PORT_RANGE_END")) {
+        options.peer_config.portRangeEnd = parse_port_value("SKUFY_ICE_PORT_RANGE_END", *end);
+    }
+    if (options.peer_config.portRangeBegin > options.peer_config.portRangeEnd) {
+        throw std::runtime_error("SKUFY_ICE_PORT_RANGE_BEGIN must be <= SKUFY_ICE_PORT_RANGE_END");
+    }
+    if (const auto servers = env_string("SKUFY_ICE_SERVERS")) {
+        for (const auto& url : split_csv(*servers)) {
+            options.peer_config.iceServers.emplace_back(url);
+        }
+    }
+    return options;
+}
 
 ServerOptions load_server_options_from_file(const std::string& config_path) {
     ServerOptions options;
@@ -410,7 +475,7 @@ private:
 };
 
 ServerOptions parse_server_options(int argc, char** argv) {
-    std::string config_path = "config.json";
+    std::optional<std::string> config_path;
     std::optional<std::uint16_t> port_override;
 
     for (int i = 1; i < argc; ++i) {
@@ -422,14 +487,10 @@ ServerOptions parse_server_options(int argc, char** argv) {
             config_path = argv[++i];
             continue;
         }
-        const int value = std::stoi(arg);
-        if (value < 1 || value > 65535) {
-            throw std::runtime_error("port must be in [1, 65535]");
-        }
-        port_override = static_cast<std::uint16_t>(value);
+        port_override = parse_port_value("port", arg);
     }
 
-    auto options = load_server_options_from_file(config_path);
+    auto options = config_path ? load_server_options_from_file(*config_path) : load_server_options_from_env();
     if (port_override) {
         options.signaling_port = *port_override;
     }

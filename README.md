@@ -35,7 +35,9 @@ cmake --build build -j
 
 Terminal 1:
 ```bash
-./build/skufy_server/skufy_server --config skufy_server/config.json
+SKUFY_BIND_ADDRESS=10.129.0.26 \
+SKUFY_ICE_BIND_ADDRESS=10.129.0.26 \
+./build/skufy_server/skufy_server
 ```
 
 Terminal 2:
@@ -59,12 +61,23 @@ docker build -f skufy_server/Dockerfile -t skufy-server:local .
 
 Run container:
 ```bash
-docker run --rm -p 8000:8000 skufy-server:local
+docker run --rm --network host \
+  -e SKUFY_SIGNALING_PORT=8000 \
+  -e SKUFY_BIND_ADDRESS=10.129.0.26 \
+  -e SKUFY_ICE_BIND_ADDRESS=10.129.0.26 \
+  -e SKUFY_ICE_PORT_RANGE_BEGIN=40000 \
+  -e SKUFY_ICE_PORT_RANGE_END=40100 \
+  -e SKUFY_ICE_SERVERS=stun:stun.l.google.com:19302 \
+  skufy-server:local
 ```
 
 Run container with custom signaling port:
 ```bash
-docker run --rm -p 50000:50000 skufy-server:local 50000
+docker run --rm --network host \
+  -e SKUFY_SIGNALING_PORT=50000 \
+  -e SKUFY_BIND_ADDRESS=10.129.0.26 \
+  -e SKUFY_ICE_BIND_ADDRESS=10.129.0.26 \
+  skufy-server:local
 ```
 
 ## Run server with Docker Compose
@@ -79,22 +92,36 @@ Stop:
 docker compose down
 ```
 
-For custom signaling port, edit `docker-compose.yml`:
-- change `skufy_server/config.json` (`signaling_port`)
+For custom signaling port:
+```bash
+SKUFY_SIGNALING_PORT=50000 docker compose up --build --force-recreate
+```
 
 The compose file uses `network_mode: host` on Linux so WebRTC ICE sees the host
 network interfaces directly. With host networking, Docker `ports` mappings are
 not used; open `signaling_port`/TCP and the configured ICE UDP port range on the
 host firewall instead.
 
-## config.json (remote host setup)
+## Environment Variables
 
-Server reads `--config skufy_server/config.json`:
-- `signaling_port`
-- `bind_address`
-- `ice_bind_address`
-- `ice_port_range_begin` / `ice_port_range_end`
-- `ice_servers` (STUN/TURN URLs)
+Server reads:
+- `SKUFY_SIGNALING_PORT`
+- `SKUFY_BIND_ADDRESS`
+- `SKUFY_ICE_BIND_ADDRESS`
+- `SKUFY_ICE_PORT_RANGE_BEGIN` / `SKUFY_ICE_PORT_RANGE_END`
+- `SKUFY_ICE_SERVERS` (comma-separated STUN/TURN URLs)
+
+Example for your remote server:
+```bash
+export SKUFY_BIND_ADDRESS=10.129.0.26
+export SKUFY_ICE_BIND_ADDRESS=10.129.0.26
+docker compose up --build --force-recreate
+```
+
+`--config skufy_server/config.json` is still supported for manual runs, but Docker
+and Compose use environment variables by default.
+
+## config.json (client setup)
 
 Client reads `--config skufy_client/config.json`:
 - `host`

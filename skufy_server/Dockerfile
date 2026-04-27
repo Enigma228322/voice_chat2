@@ -43,4 +43,3 @@ COPY --from=builder /app/build/skufy_server/skufy_server /app/skufy_server
 
 EXPOSE 8000
 ENTRYPOINT ["/app/skufy_server"]
-CMD ["8000"]
